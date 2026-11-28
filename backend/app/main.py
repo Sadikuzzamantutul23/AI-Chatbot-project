@@ -9,6 +9,7 @@ from app.database import engine
 from app.api.routes.auth import router as auth_router
 from app.api.routes.conversations import router as conversations_router
 from app.api.routes.messages import router as messages_router
+from app.api.routes.admin import router as admin_router
 
 
 app = FastAPI(
@@ -38,6 +39,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(conversations_router)
 app.include_router(messages_router)
+app.include_router(admin_router)
 
 
 @app.get("/")

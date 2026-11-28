@@ -10,15 +10,39 @@ from app.dependencies import get_db, get_current_user
 from app.models.user import User
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.models.ai_request import AIRequest
 from app.schemas.message import (
     MessageCreate,
     MessageResponse,
     MessagePairResponse,
 )
-from app.services.ai_service import generate_ai_response
+from app.services.ai_service import generate_ai_response_with_usage
+from app.core.config import GEMINI_MODEL
 
 
 logger = logging.getLogger(__name__)
+
+
+def add_ai_request_record(
+    db: Session,
+    current_user: User,
+    conversation: Conversation,
+    *,
+    succeeded: bool,
+    usage: dict | None = None,
+    error_message: str | None = None,
+) -> None:
+    usage = usage or {}
+    db.add(AIRequest(
+        user_id=current_user.id,
+        conversation_id=conversation.id,
+        model_name=GEMINI_MODEL,
+        status="success" if succeeded else "failed",
+        prompt_tokens=usage.get("prompt_tokens"),
+        completion_tokens=usage.get("completion_tokens"),
+        total_tokens=usage.get("total_tokens"),
+        error_message=error_message[:500] if error_message else None,
+    ))
 
 router = APIRouter(
     prefix="/api/conversations/{conversation_id}/messages",
@@ -95,10 +119,18 @@ def create_message(
 
     # 3. Generate AI response
     try:
-        ai_reply = generate_ai_response(messages)
+        ai_reply, usage = generate_ai_response_with_usage(messages)
 
     except APIError as error:
         logger.exception("Gemini API request failed")
+        add_ai_request_record(
+            db,
+            current_user,
+            conversation,
+            succeeded=False,
+            error_message=f"Gemini API error {error.code}",
+        )
+        db.commit()
 
         if error.code == 503:
             raise HTTPException(
@@ -106,6 +138,20 @@ def create_message(
                 detail="AI service is temporarily unavailable. Please try again later.",
             )
 
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service request failed.",
+        )
+    except Exception as error:
+        logger.exception("Unexpected AI service failure")
+        add_ai_request_record(
+            db,
+            current_user,
+            conversation,
+            succeeded=False,
+            error_message=f"{type(error).__name__}: AI service failure",
+        )
+        db.commit()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="AI service request failed.",
@@ -119,6 +165,7 @@ def create_message(
     )
 
     db.add(assistant_message)
+    add_ai_request_record(db, current_user, conversation, succeeded=True, usage=usage)
     conversation.updated_at = func.now()
 
     db.commit()
@@ -161,10 +208,19 @@ def regenerate_last_response(
     ]
 
     try:
-        assistant_message.content = generate_ai_response(prompt_history)
+        assistant_text, usage = generate_ai_response_with_usage(prompt_history)
+        assistant_message.content = assistant_text
     except APIError as error:
         logger.exception("Gemini API request failed during regeneration")
         db.rollback()
+        add_ai_request_record(
+            db,
+            current_user,
+            conversation,
+            succeeded=False,
+            error_message=f"Gemini API error {error.code}",
+        )
+        db.commit()
         if error.code == 503:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -174,7 +230,23 @@ def regenerate_last_response(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="AI service request failed.",
         )
+    except Exception as error:
+        logger.exception("Unexpected AI service failure during regeneration")
+        db.rollback()
+        add_ai_request_record(
+            db,
+            current_user,
+            conversation,
+            succeeded=False,
+            error_message=f"{type(error).__name__}: AI service failure",
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="AI service request failed.",
+        )
 
+    add_ai_request_record(db, current_user, conversation, succeeded=True, usage=usage)
     conversation.updated_at = func.now()
     db.commit()
     db.refresh(assistant_message)

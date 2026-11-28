@@ -5,6 +5,7 @@ import Navbar from "./components/Navbar";
 import WelcomeScreen from "./components/WelcomeScreen";
 import ChatInput from "./components/ChatInput";
 import AuthScreen from "./components/AuthScreen";
+import AdminDashboard from "./components/AdminDashboard";
 
 const ChatMessages = lazy(() => import("./components/ChatMessages"));
 
@@ -12,12 +13,15 @@ function App() {
   const [token, setToken] = useState(() => localStorage.getItem("chat_token"));
   const [user, setUser] = useState(null);
   const [conversations, setConversations] = useState([]);
+  const [conversationsLoading, setConversationsLoading] = useState(() => Boolean(localStorage.getItem("chat_token")));
   const [activeChatId, setActiveChatId] = useState(null);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [activeView, setActiveView] = useState("chat");
+  const [theme, setTheme] = useState(() => localStorage.getItem("clarity_theme") === "dark" ? "dark" : "light");
   const activeChatIdRef = useRef(activeChatId);
   const skipNextMessageLoad = useRef(null);
 
@@ -26,7 +30,13 @@ function App() {
     localStorage.setItem("chat_token", value);
     setAuthToken(value);
     setToken(value);
+    setConversationsLoading(true);
   };
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("clarity_theme", theme);
+  }, [theme]);
 
   const loadConversations = useCallback(async () => {
     const { data } = await api.get("/api/conversations");
@@ -48,7 +58,8 @@ function App() {
         localStorage.removeItem("chat_token");
         setAuthToken(null);
         setToken(null);
-      });
+      })
+      .finally(() => { if (mounted) setConversationsLoading(false); });
     return () => { mounted = false; };
   }, [token]);
 
@@ -110,8 +121,8 @@ function App() {
     finally { setSending(false); }
   };
 
-  const handleNewChat = () => { activeChatIdRef.current = null; setActiveChatId(null); setMessages([]); setLoading(false); setError(""); setMobileOpen(false); };
-  const selectChat = (id) => { activeChatIdRef.current = id; setMessages([]); setLoading(true); setError(""); setActiveChatId(id); setMobileOpen(false); };
+  const handleNewChat = () => { setActiveView("chat"); activeChatIdRef.current = null; setActiveChatId(null); setMessages([]); setLoading(false); setError(""); setMobileOpen(false); };
+  const selectChat = (id) => { setActiveView("chat"); activeChatIdRef.current = id; setMessages([]); setLoading(true); setError(""); setActiveChatId(id); setMobileOpen(false); };
   const renameChat = async (chat, title) => {
     if (!title?.trim() || title.trim() === chat.title) return;
     try {
@@ -126,17 +137,22 @@ function App() {
       if (activeChatId === chat.id) handleNewChat();
     } catch (e) { setError(apiError(e)); }
   };
-  const logout = () => { activeChatIdRef.current = null; localStorage.removeItem("chat_token"); setAuthToken(null); setToken(null); setUser(null); setConversations([]); setActiveChatId(null); setMessages([]); };
+  const logout = () => { activeChatIdRef.current = null; localStorage.removeItem("chat_token"); setAuthToken(null); setToken(null); setUser(null); setConversations([]); setConversationsLoading(false); setActiveChatId(null); setMessages([]); };
 
   if (!token || !user) return <AuthScreen onAuthenticated={(result) => { saveToken(result.token); setUser(result.user); }} />;
   return (
-    <div className="app-shell">
-      <Sidebar onNewChat={handleNewChat} conversations={conversations} activeChatId={activeChatId} onSelectChat={selectChat} user={user} onLogout={logout} onRename={renameChat} onDelete={deleteChat} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
-      <main className="chat-main">
+    <div className="flex h-dvh min-h-0 w-full overflow-hidden bg-page text-ink">
+      <Sidebar onNewChat={handleNewChat} conversations={conversations} conversationsLoading={conversationsLoading} activeChatId={activeChatId} onSelectChat={selectChat} user={user} isAdmin={user.is_admin} onOpenAdmin={() => { setActiveView("admin"); setMobileOpen(false); }} onThemeToggle={() => setTheme((current) => current === "light" ? "dark" : "light")} theme={theme} onLogout={logout} onRename={renameChat} onDelete={deleteChat} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
+      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-page">
+        {activeView === "admin" && user.is_admin ? <AdminDashboard user={user} onBack={() => setActiveView("chat")} /> : <>
         <Navbar title={activeChat?.title} onMenu={() => setMobileOpen(true)} />
-        {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError("")}>Dismiss</button></div>}
-        {loading ? <div className="loading-state"><span className="spinner"/> Loading conversation…</div> : messages.length === 0 ? <WelcomeScreen onSuggestionClick={handleSend} /> : <Suspense fallback={<div className="loading-state"><span className="spinner"/> Preparing conversation…</div>}><ChatMessages messages={messages} sending={sending} onRegenerate={regenerateResponse} /></Suspense>}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          {error && <div className="mx-auto mt-3 flex w-[min(calc(100%-3rem),48rem)] items-center justify-between gap-3 rounded-xl border border-danger/30 bg-danger-soft px-4 py-3 text-xs text-danger max-md:w-[calc(100%-1.75rem)]" role="alert"><span>{error}</span><button className="font-semibold" onClick={() => setError("")}>Dismiss</button></div>}
+          {loading ? <div className="flex min-h-0 flex-1 items-center justify-center gap-3 text-sm text-ink-muted"><span className="size-[18px] animate-spin rounded-full border-2 border-border-strong border-t-accent"/> Loading conversation…</div> : messages.length === 0 ? <WelcomeScreen onSuggestionClick={handleSend} /> : <Suspense fallback={<div className="flex min-h-0 flex-1 items-center justify-center gap-3 text-sm text-ink-muted"><span className="size-[18px] animate-spin rounded-full border-2 border-border-strong border-t-accent"/> Preparing conversation…</div>}><ChatMessages messages={messages} sending={sending} onRegenerate={regenerateResponse} />
+          </Suspense>}
+        </div>
         <ChatInput onSend={handleSend} disabled={sending} />
+        </>}
       </main>
     </div>
   );
